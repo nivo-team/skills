@@ -1,0 +1,8 @@
+# 统一行尾，避免 Windows 提交把 CRLF 带进来（校验器会告警）
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

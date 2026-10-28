@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "generatedAt": "2026-10-28",
+  "$comment": "skill 的来源与归属。nivo/ 为在 dashboard 内自建，其余为上游引入（见 upstream-skills-lock.json 的原始路径与哈希）。上游引入的 skill 本地有改动时，同步上游前必须手合并。",
+  "skills": {
+    "ask-matt": { "origin": "mattpocock/skills", "path": "skills/engineering/ask-matt", "locallyModified": false },
+    "code-review": { "origin": "mattpocock/skills", "path": "skills/engineering/code-review", "locallyModified": false },
+    "codebase-design": { "origin": "mattpocock/skills", "path": "skills/engineering/codebase-design", "locallyModified": false },
+    "diagnosing-bugs": { "origin": "mattpocock/skills", "path": "skills/engineering/diagnosing-bugs", "locallyModified": false },
+    "grill-with-docs": { "origin": "mattpocock/skills", "path": "skills/engineering/grill-with-docs", "locallyModified": false },
+    "pr": { "origin": "mattpocock/skills", "path": "skills/engineering/pr", "locallyModified": false },
+    "research": { "origin": "mattpocock/skills", "path": "skills/engineering/research", "locallyModified": false },
+    "grill-me": { "origin": "mattpocock/skills", "path": "skills/productivity/grill-me", "locallyModified": false },
+    "kumo-design": { "origin": "cloudflare/kumo", "path": "skills/design/kumo-design", "locallyModified": false },
+    "ai-development": { "origin": "nivo-team/dashboard", "path": "skills/nivo/ai-development", "locallyModified": true },
+    "business-development": { "origin": "nivo-team/dashboard", "path": "skills/nivo/business-development", "locallyModified": true },
+    "platform-development": { "origin": "nivo-team/dashboard", "path": "skills/nivo/platform-development", "locallyModified": true },
+    "platform-ops": { "origin": "nivo-team/dashboard", "path": "skills/nivo/platform-ops", "locallyModified": true },
+    "verify": { "origin": "nivo-team/dashboard", "path": "skills/nivo/verify", "locallyModified": true }
+  }
+}

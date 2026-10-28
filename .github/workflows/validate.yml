@@ -1,0 +1,34 @@
+name: Validate skills
+
+# skill 仓库唯一的门控：结构 / frontmatter / 预算 / 体积 / 卫生。
+# 只依赖 Node 内置模块，不装依赖 —— 30 秒内跑完。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate-skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # --strict：warning 也当失败。规范里写「建议」的东西在这里是硬约束，
+      # 否则警告会一路飘到没人看。
+      - name: 校验 skill
+        run: node scripts/validate-skills.mjs --strict

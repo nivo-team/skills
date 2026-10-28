@@ -1,0 +1,32 @@
+{
+  "$comment": "skills 仓库的唯一配置真值。改这里之前先读 spec/SKILL-SPEC.md。",
+  "specVersion": 2,
+  "scopes": {
+    "engineering": {
+      "kind": "generic",
+      "description": "与具体项目无关的工程方法：评审、调试、设计、调研、交付。任何仓库都能用。"
+    },
+    "design": {
+      "kind": "generic",
+      "description": "设计系统与视觉规范相关的通用能力。"
+    },
+    "productivity": {
+      "kind": "generic",
+      "description": "与人协作、提问、澄清类的方法。"
+    },
+    "nivo": {
+      "kind": "project",
+      "description": "nivo-team 工作空间专属规范，绑定具体仓库。",
+      "requiresAppliesTo": true
+    }
+  },
+  "limits": {
+    "maxIndexBytes": 20480,
+    "maxSkillBytes": 1048576,
+    "maxNameLength": 40,
+    "maxDescriptionLength": 512,
+    "minDescriptionLength": 16,
+    "maxTags": 6,
+    "maxDepth": 4
+  }
+}

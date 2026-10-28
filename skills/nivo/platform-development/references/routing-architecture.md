@@ -1,0 +1,417 @@
+# 路由与布局架构
+
+本项目基于 `@tanstack/react-router` 采用**文件系统路由**与**分层无路径布局**，核心设计理念是：**外壳由 layout 持有，页面级异步只影响内容区，保证极致流畅的操作体验**。
+
+---
+
+## 1. 路由分层拓扑
+
+```
+apps/web/src/routes/
+├── __root.tsx                 # 根路由：提供 Kumo LinkProvider、全局 Toasty 容器、全屏 404 与 Devtools
+├── auth/                      # 认证门户专用布局
+│   ├── route.tsx              #   顶部悬浮语言与主题切换器
+│   ├── index.tsx              #   /auth 重定向至 /auth/login
+│   ├── login.tsx              #   登录页面 (/auth/login)
+│   ├── register.tsx           #   注册页面 (/auth/register)
+│   ├── forgot-email.tsx       #   找回邮箱 (/auth/forgot-email)
+│   ├── forgot-password.tsx    #   重置密码 (/auth/forgot-password)
+│   └── oauth/                 #   OAuth 回调 (/auth/oauth/$provider/callback)
+├── _main/                     # 与 appId 无关的通用外壳布局（无路径布局）
+│   ├── route.tsx              #   全局工作台外壳（Kumo Sidebar + Header，登录鉴权拦截）
+│   ├── index.tsx              #   根路径 /：应用选择 + 应用管理页 (SelectAppPage)
+│   ├── select-app.tsx         #   兼容旧路由 /select-app，重定向至 /
+│   ├── settings/              #   设置模块（进入后侧边栏切换为模块专属二级导航）
+│   │   ├── route.tsx          #     模块根：仅 <Outlet />；二级侧边栏由 MainLayout 按路由前缀切换
+│   │   ├── index.tsx          #     /settings 重定向到默认子页 /settings/profile
+│   │   ├── profile.tsx        #     个人资料 (/settings/profile)：薄路由，页面在 features/settings/profile.tsx
+│   │   └── appearance.tsx     #     外观 (/settings/appearance)：薄路由，页面在 features/settings/appearance.tsx
+│   └── $.tsx                  #   _main 外壳内局部 404 兜底路由
+└── $appId/                    # 业务控制台应用前缀（参数化动态应用路由，去除了中间冗余 _app）
+    ├── route.tsx              #   AppShell 外壳：侧边栏 + 顶栏 + ⌘K 面板（App 校验、同步与规范化）
+    ├── index.tsx              #   访问 /$appId 自动重定向至默认首页 /$appId/home
+    ├── home/                  #   /$appId/home 业务仪表盘默认首页（目录化模块）
+    ├── example/               #   /$appId/example 示例（表格示例 / 复杂表格）
+    ├── system/                #   /$appId/system 系统（功能 / 数据字典）
+    └── $.tsx                  #   外壳内局部 404 页面
+└── $appId_.sphere/            # 全屏 AI 对话页 /$appId/sphere（**逃离 $appId 布局**，无应用侧边栏）
+    ├── route.tsx              #   全屏布局：守卫 + 会话侧边栏 + 圆角 chat 面板（<Outlet />）
+    │                          #     面板的进出场动画也在这一层（scale + 透明度）
+    ├── index.tsx              #   /$appId/sphere        新会话
+    ├── chat/$chatId.tsx       #   /$appId/sphere/chat/$chatId  指定会话（找不到 → 404）
+    └── （页面实现在 src/features/ai/sphere/：sphere-chat / sphere-sidebar / session-search-dialog）
+```
+
+> **模块目录化（强制）**：业务模块一律用目录承载（`route.tsx` = 模块根与边界、`index.tsx` = 入口）；
+> 私有实现不放路由目录，而是**平铺在 `src/features/<页面目录>/`**（一页一目录，见 features-architecture.md）。
+> 上面 `home/`、`example/`、`system/` 都是这套约定；`$appId_.sphere/`
+> 是同一个模块，只是用段尾下划线逃离了 `$appId` 布局 —— 见 §2「逃离父布局」。
+
+---
+
+## 2. 核心架构机制
+
+### 双层外壳拓扑：_main 与 $appId 隔离
+- **全局通用外壳 (`_main/`)**：处理与具体应用无关的通用业务，例如根路径的应用选择 + 应用管理 (`/`)、个人资料 (`/settings/profile`) 等。应用管理放这里而不是 `/$appId/system/*`：应用是工作空间的根概念，管它不该先进入某个应用（鸡生蛋）。选择与管理**同一页**（`/`）——点行进应用，写按钮按 `app:create/edit/delete` 收敛，不再单开 `/apps` 页。
+- **业务控制台外壳 (`$appId/`)**：扁平化去除了多余的 `_app` 中间层，直接由 `apps/web/src/routes/$appId/route.tsx` 承载 `AppShell`。每个应用系统享有隔离的 URL 空间 `/$appId/...`，路由守卫自动根据 URL 参数同步激活当前 App 及其专属的 `apiBaseUrl`。
+- **单应用 vs 多应用模式（环境变量可配）**：
+  - **单应用模式（默认，`VITE_MULTI_APP=false`）**：
+    - 访问 `/` 路由或登录成功后，无需调用 `GET /apps` 接口，守卫自动重定向到默认应用路由（如 `/$DEFAULT_APP_ID/home`，默认 `nivo`）；
+    - 保持原有的 IndexedDB 与 localStorage 存储架构不变，仍以默认应用 ID 作为作用域隔离基准；
+    - 通用外壳与侧边栏自动隐藏「应用选择」项，应用切换器转为纯静态应用名展示，流程极简。
+  - **多应用模式（`VITE_MULTI_APP=true`）**：
+    - 开启工作空间应用选择页 (`/`) 与侧边栏多应用切换器，调用 `GET /apps` 动态载入多应用列表。
+- **默认首页与智能面包屑**：
+  - 应用默认首页统一规范为 `/$appId/home`（访问 `/$appId` 自动重定向）；
+  - 顶栏面包屑自动剥离第一段 `$appId` 参数，使业务层级链路清晰直观（如 `/$appId/home` 显示为 `首页`，`/$appId/orders` 显示为 `首页 / 订单管理`）；
+  - 历史别名路径（如 `/admin`）会自动规范化重定向至 `/$appId/home`；
+  - 未知应用校验：若 URL 中指定的 `$appId` 不在可用应用列表与系统预设中，路由守卫直接抛出 `notFound()` 并在 `_main` 通用外壳中呈现 404 引导页，使用户仍可通过完整的导航与侧边栏回到工作空间。
+
+### 单应用模式能不能去掉 `/$appId` 前缀（调研结论）
+
+**问题**：单应用模式下永远只有一个应用，URL 里的 `/$appId`（如 `/nivo/system/roles`）
+是不是多余的？能不能干脆去掉，或者用一个中性的占位符（如 `/_`）？
+
+**结论**：**能去掉，但代价是全量路由改造；短期更稳的做法是把前缀固定为一个中性常量（`_` 占位），而不是真的删段。**
+
+**关键事实：`$appId` 这段路径不是数据作用域的真值。** 应用隔离靠的是 store 里的
+`currentApp`，不是 URL —— 三处证据：
+
+- API 请求头 `X-App-Id` 取自 `useAuthStore` 的 `currentApp.id`（`src/api/index.ts` 的
+  `configureAuthInterceptors`），与 URL 无关；
+- 存储作用域由 `setAppScope(chosenApp.id)` 驱动（`src/lib/store/auth-store.ts`），与 URL 无关；
+- 查询缓存按应用分区，同样读 `currentApp`（`src/lib/store/app-scope`、`query-client`）。
+
+所以 URL 里的 `$appId` 只承担三件事：**选中态同步、404 守卫、以及作为所有链接的前缀**。
+这三件事是「路由架构」层的，不涉及数据正确性 —— 删掉它不会串数据，只会牵动路由。
+
+**`$appId` 是承重墙，具体承重处**：
+
+- 布局路由本身：`src/routes/$appId/route.tsx`（`AppShell` 挂在这里），以及刻意逃离它的
+  `src/routes/$appId_.sphere/route.tsx`（全屏 AI 对话页）；
+- 守卫唯一入口 `guardAppRoute({ appId, href })`（`src/lib/app-route-guard.ts`）——
+  认证、应用有效性、选中态同步都在这里，两处挂载点共用；
+- 所有页面链接前缀：`src/lib/navigation/app-nav.ts` 的 `NAV_GROUPS` 里 `to` 是**相对**路径，
+  由外壳拼成 `/${appId}${to}`；`useCrudView` 的 `basePath`、面包屑剥离
+  （`src/lib/breadcrumb-trail.ts` / `use-breadcrumbs`）、页面标签页（`src/lib/page-tabs.ts`）
+  都依赖这段前缀。
+
+**三条可选路线**：
+
+| 方案 | 做法 | 代价 / 风险 |
+| --- | --- | --- |
+| **A. 可选路径参数** | TanStack Router 的 `{-$appId}`（v1.81+）把这段声明为可选，`/home` 与 `/nivo/home` 都能命中 | 真正的「去前缀」，但**每个路由文件要改名**（`$appId/route.tsx` → `{-$appId}/route.tsx`），且所有 `to=/$appId/...` 链接、`basePath`、面包屑、标签页都要改成可选形式；改动面 = 全部路由 + 全部链接构造点 |
+| **B. 按模式生成两套路由** | 单应用产出无前缀树、多应用产出带前缀树 | **违反「名单只有一个真值」**：两套树必然分叉，新增页面要写两遍，是最不推荐的一条 |
+| **C. 前缀固定为中性占位常量** | 单应用模式把 `DEFAULT_APP_ID` 定为 `_`（或保留 `nivo`），URL 变成 `/_/home` | **零路由改动**：只是路径前缀值从应用名换成中性串。`_` 是合法路径段，守卫 / 作用域 / `X-App-Id` 照常工作。语义上诚实地表达「此为占位，非真实应用名」 |
+
+**推荐**：短期走 **C**（把单应用前缀从品牌名 `nivo` 收敛成中性 `_`，消除「URL 里出现应用名」的
+违和感，同时零风险）；若要做成真正的「无前缀」，按 **A** 单独开一次改动，**以
+`guardAppRoute` 为唯一改造收口**，不要走 B。
+
+> 注意：`_` 与 TanStack 的「段尾下划线」约定（`$appId_.sphere`）无关 —— 后者是文件名里的
+> 布局逃逸标记，不出现在 URL；前者是 URL 里的一个普通字面段。两者不要混淆。
+
+### 逃离父布局：全屏 AI 对话页（`$appId_.sphere`）
+`/$appId/sphere` 是 AI 面板头行「最大化」按钮的落点：一个**没有应用侧边栏**的独立
+chat 页面，自己的侧边栏是 AI 会话列表。
+
+它**不是** `$appId` 布局的子路由 —— 否则会一并继承 `AppShell` 的侧边栏、顶栏与面板。
+用的是 TanStack Router 的「**段尾下划线**」约定：目录名写成 `$appId_.sphere`，
+`$appId` 那一段就不再和 `$appId/route.tsx` 布局嵌套，路由挂到根布局下，
+但 URL 仍是 `/$appId/sphere`（`tsr generate` 会把它生成为 `id: '/$appId_/sphere'`、
+`path: '/$appId/sphere'`，**文件名里的下划线是约定，不是 URL 的一部分**）。
+
+由此带来两条必须记住的后果：
+
+1. **守卫要自己接**：拿不到 `$appId/route.tsx` 的 `beforeLoad`，必须在自己的
+   `beforeLoad` 里调用 `#/lib/app-route-guard` 的 `guardAppRoute`（认证 + appId 校验 +
+   激活应用同步）。**两处共用同一个函数**，不要各写一份 —— 它同时也是 `AppShell` 的守卫。
+2. **外壳桥要自己注册**：`AppShell` 里给 AI 工具层的 `registerAiShellBridge`
+   （`navigate` / `getRoutePath`）不会跟着过来，`$appId_.sphere/route.tsx` 里重新注册一次
+   （两者互斥挂载，单槽注册不会互相覆盖）。
+
+AI 状态（`features/ai/core/session-store`）是模块级 zustand store，与路由无关，
+所以面板「最大化」到本页时当前这段对话**原样续上**，不存在两套会话。
+「最大化」的落点按**面板里有没有会话**分两种：有 → `sphere/chat/$chatId`，没有 → `sphere/`。
+
+页面自身的结构（`$appId_.sphere/`）：
+
+- `route.tsx`：最外层 `h-svh bg-kumo-canvas p-2`（整页留一圈内边距），里面是
+  `Sidebar.Provider`（Kumo，`contained` + `variant="inset"` + `collapsible="offcanvas"`）——
+  **侧边栏与 chat 区共用同一块 `rounded-xl border` 面板**；内外分隔线由侧边栏自己按开合
+  画（`variant="inset"` 让 Kumo 不加 `border-e`，否则收起后会剩一条悬空竖线）。
+  这里还统一加载会话列表
+  （`loadHistory({ fresh: true })`，只拉列表、**不恢复**上一次的会话）并挂 ⌘K 的
+  `CommandPaletteDialog`；
+- `index.tsx`：`/$appId/sphere` = **新会话**（挂载即 `startNewSession()`）；
+- `chat/$chatId.tsx`：`/$appId/sphere/chat/$chatId` = **指定会话**。loader 先确认这条
+  记录在当前应用里存在，不存在 `throw notFound()` → `SphereNotFound`（AI 形象 + 文案，
+  **不用**通用线框 404）；存在才让组件把 store 切过去（`activeSessionId` 已一致时不切，
+  避免把流式增量冲掉）；
+- `features/ai/sphere/sphere-header.tsx`：**头行挂在布局上**（三列等宽网格 → 标题居中，行首是
+  侧边栏收起时才出现的展开按钮、行尾是「收起」）。放在布局而不是页面里，是为了让会话 404
+  也留着头行（`notFoundComponent` 只替换路由组件）；标题因此按路由推导 ——
+  `sphere/` 用当前会话，`sphere/chat/$chatId` 从会话列表按 id 取，**列表里没有就留空**
+  （这正是「404 时 header 还在、只是不显示内容」）；
+- `features/ai/sphere/sphere-chat.tsx`：两个路由共用的 chat 本体（**只有会话区 + 输入区**），
+  输入区上沿不画分隔线；会话区用与面板共用的 `AiConversationScroller`（跟随滚动 / 回到底部）；
+  宽度档位见设置 → AI → 页面宽度（`#/lib/page-width` 的 `aiChatWidthClass`：跟随外观 /
+  全宽 / 限宽居中，上限是 `max-w-4xl`）——**约束挂在「内容」那一层，滚动容器仍铺满**，
+  滚动条才始终贴在面板边缘（限宽模式下也是）；配合 `scrollbar-gutter: stable both-edges`
+  让内容不跳动、中心与下方输入区对齐；
+- `features/ai/sphere/use-sphere-collapse.ts`：收起全屏 = 回到**点「最大化」时所在的那一页**
+  （href 记在 sessionStorage，见 `#/features/ai/core/panel-session`；没有记录才回落应用首页）；
+- `features/ai/sphere/sphere-not-found.tsx`：会话 404 的空态（AI 形象 + 文案 + 「新对话」）；
+  头行还在，所以这里不再重复放「收起」；
+- `features/ai/sphere/sphere-sidebar.tsx`：Kumo `Sidebar` 组件写的会话侧边栏，头行 = 品牌 + 标题 +
+  **展开态下的收起按钮**；内外分隔线也归它（展开时才画 `border-e`，收起后随整列一起消失）；
+  会话选择走 **URL 导航**而不是直接调 store（一个落点只有一个所有者）；
+  收起按钮**一次只显示一个**：展开态在侧边栏头行、收起态在 chat 头行；
+- `features/ai/sphere/session-search-dialog.tsx`：只搜会话标题的独立弹窗，形态同命令面板。
+
+### 外壳持久化（Zero-Remount）
+`AppShell` 与 `MainLayout` 分别挂载在 `$appId/route.tsx` 和 `_main/route.tsx` 上。子路由切换时：
+- 侧边栏折叠状态、拖拽宽度、内部滚动位置**完全保留**；
+- 页面仅在 `<Outlet />` 区域替换组件，避免整页闪烁与重复渲染。
+
+### 外壳的组成：统一 Layout 体系与三大变体
+
+外壳布局统一归拢在 `#/layouts`（`apps/web/src/layouts`）。对外提供统一的 `AppShell` 与 `MainLayout`，内部根据宿主与视口决策器（`useActiveLayout()`）自动分派对应端物理隔离的布局实现：
+
+- **`default` 变体**（`#/layouts/default`）：Web 浏览器通用布局，经典的 Flex 一行流，顶栏集成在内容列中；
+- **`desktop` 变体**（`#/layouts/desktop`）：PC 桌面原生壳专属（macOS / Windows / Linux），整宽 fixed 浮层窗口条取代传统顶栏，全高毛玻璃侧边栏；
+- **`mobile` 变体**（`#/layouts/mobile`）：移动端视口与移动浏览器 / 移动壳专属，沉浸式顶部安全区适配（`safe-area-inset-top`），汉堡按钮唤出全屏抽屉侧边栏，点击导航项后自动收拢。
+
+布局目录内各自独立组织 `header.tsx`、`app-layout.tsx`、`main-layout.tsx` 等子模块。
+
+#### 变体之间怎么共用：**一份实现 + 一张变体表**
+
+「物理隔离」指的是**外壳骨架**（顶栏 / 窗口条 / 内容列的排布方式），不是把每个零件都抄三份。
+早期三个变体各有一份 ~200 行的 `sidebar.tsx`，其中菜单树渲染、高亮判定、权限过滤、
+搜索入口**逐字相同**，只有四处平台差异 —— 三份并存意味着「改一处忘两处」。
+
+现在的划分（**加平台 = 加一行表**，渲染逻辑一行都不用动）：
+
+| 位置 | 角色 |
+| --- | --- |
+| `#/layouts/common/app-sidebar.tsx` | 业务侧边栏（`$appId` 导航）唯一实现 + `SIDEBAR_VARIANTS` 变体表 |
+| `#/layouts/common/main-sidebar.tsx` | 通用外壳侧边栏（`_main` 导航 + 设置二级导航）唯一实现 + `MAIN_SIDEBAR_VARIANTS` 变体表 |
+| `#/layouts/common/sidebar-variant.ts` | `SidebarVariant` 与「外壳布局 → 变体」映射，**两个侧边栏共用一份** |
+| `#/layouts/common/sidebar-chrome.ts` | 平台相关的那几串 className（安全区高度、折叠态描边、收起态隐藏文案） |
+| `#/layouts/common/nav-matching.ts` | 应用内导航高亮判定（纯函数，有单测） |
+| `#/components/app-sidebar.tsx`、`#/components/main-sidebar.tsx` | 环境分派：`useActiveLayout()` → 变体，选纯视图还是抽屉包装 |
+
+变体差异一共四类，全部在表里：**顶栏形态**（应用切换器 / 抽屉头 + 关闭键 / 不渲染）、
+**底部折叠按钮**、**点击导航后是否收起抽屉**、**长文案是否在收起态隐藏**。
+
+两个坑：
+
+1. **抽屉感知必须拆成两层组件**（`*View` + `Drawer*`）：`useSidebar()` 需要
+   `Sidebar.Provider` 祖先，而**桌面壳的外壳没有这个 Provider**（折叠由窗口标题栏统一控制）。
+   合回一个组件会让桌面端一渲染就报错，而 hook 不能有条件调用。
+2. **桌面壳的「设置」开独立窗口，但设置窗口里的导航不能再开一个**：
+   `settingsInOwnWindow` 只在 `!isSettingsSection` 时生效，否则会无限套娃。
+
+
+### 桌面壳里的外壳形态（全高侧边栏 + 整宽窗口条浮层）
+在桌面壳里（`isDesktop()`，标记来自 URL，见 [apps/native/README.md](../../../../apps/native/README.md)）
+两个外壳都换一种形态：侧边栏是**整窗高的左列**（`100svh`、**背景透明**），右侧是**工作区**；
+**窗口条**（`#/native/title-bar`）是盖在最顶端的**整宽浮层**（取代顶栏）：
+
+- **控制组**（收起侧边栏开关 + 前进后退）**属于窗口条**，
+  浮在透明侧边栏之上 —— 侧边栏收起时控件不动，因此**不需要折叠时切换组件**；
+- **页面标签条**（`#/components/page-tab-strip`：已打开的页面 + 「+」页面菜单）紧跟在控制组之后；
+- **行末工具区**：原本顶栏的 `HeaderActions`（按钮尺寸收紧为 sm）；
+- **红绿灯 / 窗口按钮避让**：原生控件占的位置由 `--shell-traffic-light-w`（左）与
+  `--shell-window-controls-w`（右）表示，窗口条用物理 `padding` 让开。两者在 `styles.css` 里
+  转发自 MyGo 注入的 `--mygo-titlebar-inset-left/right`：macOS 是系统红绿灯（物理左侧，
+  RTL 下内容可镜像但留白恒在左侧），Windows / Linux 是系统窗口按钮（行末）。
+
+于是布局由「窗口条在上」变成「整宽窗口条浮层 ─ 全高透明侧边栏 │ 工作区」：
+
+- **窗口条由谁排**：`#/layouts/desktop/shell-layout` 的 `DesktopShellLayout` —— 它把
+  窗口条渲染成 `fixed` 浮层（不占文档流），并给工作区留出
+  `pt-[--shell-chrome-h]`；`LayoutSidebarProvider` 只负责排「全高侧边栏 │ 工作区」这一行；
+- **顶栏不再渲染**（`AppHeader` / `MainHeader`）：窗口条与它是同一份 chrome 的两种形态，
+  不是两行（桌面壳里 `ShellLayout` 只渲染窗口条，顶栏插槽根本不挂）；
+- **标签条只属于桌面壳**：`#/components/page-tab-strip` 只挂在**桌面壳的窗口条行首**
+  （主窗口的 `#/native/title-bar` 与撕出去的独立窗口 `#/native/standalone-layout`，
+  `variant="chrome"`）；Web 布局（`#/layouts/default` 与 `#/layouts/mobile`）的顶栏行首
+  **固定是面包屑**，不再挂标签条。设置里也**没有开关**（原来的「页面标签页」开关已移除，
+  `#/lib/store/shell-ui-store` 里不再有 `pageTabsEnabled`）：要不要标签条不是可配置项，
+  它由「是不是桌面壳」决定；
+- **标签页的真值**在 `#/lib/page-tabs`：一个标签 = 导航清单里的一项（`NAV_GROUPS` /
+  `ALL_SHELL_NAV_TARGETS` 的最长前缀命中），所以 `/$appId/system/menus/483` 与
+  `/$appId/system/menus` 共用「菜单管理」这一个标签，**加页面不用动标签代码**；
+  标签集合存在 `sessionStorage`（`admin.page-tabs`）：刷新 / 壳 Reload 之后原样回来，
+  窗口关掉后一般随之清空（激活态永远由 URL 决定，恢复时不存图标 —— 组件引用没法序列化，
+  按 `to` 重新解析）；
+- **标签的交互**（拖拽排序 / 右键菜单 / 固定）都收在 `#/components/page-tab-strip` 与
+  `#/components/page-tab-item` 里，只有它们认识 router：`useTabActions` 统一处理
+  「关掉之后看哪一页」（**当前页还在就原地不动**，否则跳到那个一定活下来的落点）。
+  排序用 **dnd-kit**（`PointerSensor` + 6px 激活距离，避免把「点击切换」误判成拖拽；
+  指针拖拽结束后那一下 click 由 `markDragEnd()` 的时间戳挡掉），且**只在同一组内互动** ——
+  拖未固定的标签时固定那一排整个退出（不可落、不位移），反之亦然。
+  **固定**的标签排在最前、只显示图标，且不参与「关闭左侧 / 右侧」与跨区拖拽；
+  排序与固定的规则都在 store 里（`moveTab` / `togglePinned` / `closeSide`），
+  组件只负责把动作接上去 —— **这条边界别打破**：数据层不认识 router，界面层不认识排序规则；
+- **高度**：窗口条高度 = `--shell-chrome-h`（默认 40px）；侧边栏是全窗高左列（`100svh`），
+  窗口条只占工作区；两个面板列（AI 分屏、详情分屏）按 `--shell-chrome-h` 扣掉窗口条 ——
+  见 [ui-and-styling.md](./ui-and-styling.md) §4。
+
+侧边栏的 `Sidebar.Provider` 接线（含**桌面非受控、移动端受控**这套移动端抽屉接法）
+统一在 `#/layouts/provider` 的 `LayoutSidebarProvider`，两个外壳共用一份 ——
+原因与踩过的坑见 [store.md](./store.md) §5.4。
+
+### 局部异步与状态隔离
+在 `apps/web/src/router.tsx` 中配置了全局默认状态组件：
+- `defaultPendingComponent`: 加载骨架屏；
+- `defaultErrorComponent`: 页面错误边界；
+- `defaultNotFoundComponent`: 局部 404 兜底。
+
+这些组件会被挂载在**当前触发路由的 `<Outlet />`** 位置，不会替换整页或破坏外部侧栏与顶栏。
+
+### 防抖与预加载体验
+- **防闪烁机制**：`defaultPendingMs: 150`（150ms 内完成请求不出现加载动画）与 `defaultPendingMinMs: 300`（一旦展示加载动画至少保留 300ms，避免动画闪现）。
+- **意图预加载**：`defaultPreload: 'intent'`，鼠标悬停链接时自动预拉取路由代码与 loader 数据。
+
+---
+
+## 3. 开发指引：添加新页面
+
+1. **新建业务路由文件**：在 `apps/web/src/routes/$appId/` 对应路径下创建 `.tsx` 文件（如 `apps/web/src/routes/$appId/orders.tsx` 即映射为 `/$appId/orders`）：
+   ```tsx
+   import { createFileRoute } from '@tanstack/react-router'
+   import { PageHeader } from '#/components/page-header'
+
+   export const Route = createFileRoute('/$appId/orders')({
+     loader: async () => {
+       const data = await fetchOrders()
+       return { data }
+     },
+     component: OrdersPage,
+   })
+
+   function OrdersPage() {
+     const { data } = Route.useLoaderData()
+     return <PageHeader title="订单管理" description={`当前共 ${data.length} 笔订单`} />
+   }
+   ```
+
+2. **配置导航与快捷入口**：在 `apps/web/src/lib/navigation/app-nav.ts` 的 `NAV_GROUPS` 中添加该项，侧边栏与 ⌘K 命令面板将同步生效。
+
+3. **嵌套子导航**：如需多标签页或二级页面，可创建同名布局 `orders.tsx`（内含 Tab 栏与 `<Outlet />`）以及 `orders/index.tsx`、`orders/detail.tsx`。
+
+2. **配置导航与快捷入口**：在 `apps/web/src/lib/navigation/app-nav.ts` 的 `NAV_GROUPS` 中添加该项，侧边栏与 ⌘K 命令面板将同步生效。
+
+3. **嵌套子导航**：如需多标签页或二级页面，可创建同名布局 `orders.tsx`（内含 Tab 栏与 `<Outlet />`）以及 `orders/index.tsx`、`orders/detail.tsx`。
+
+---
+
+> 以下由 `AGENTS.md` §1 搬入（原文保留）。**契约级的硬约束仍在 `AGENTS.md`**，
+> 这里放完整说明：目录拓扑、各路由文件的职责、设置模块的侧边栏切换、面包屑与注册机制。
+
+## 1. 多布局分层路由架构 (Multi-Layout Routing Architecture)
+
+> 路由分层拓扑、外壳持久化（Zero-Remount）与「加新页面」的步骤见
+> [./routing-architecture.md](./routing-architecture.md)。
+
+路由文件位于 `apps/web/src/routes/`，自动汇编输出为 `apps/web/src/routeTree.gen.ts`（自动生成，禁止手动编辑）。
+
+- `__root.tsx`：根路由。统一使用 `<LinkProvider component={AppLink}>` 桥接所有 Kumo 内部链接至 TanStack 客户端导航，挂载全局 `<Toasty toastManager={appToastManager}>` 通知容器（共享管理器见 `apps/web/src/lib/toast.ts`，供 API 拦截器等非 React 上下文复用），并集成 TanStack Devtools。
+- `_main/`：与 `appId` 无关的全局通用无路径外壳 (`_main/route.tsx`)。
+  - `_main/index.tsx`：根路径 (`/`)。在多应用模式下承载 `SelectAppPage` —— **应用选择 + 应用管理同一页**（点行进入应用；新建 / 编辑 / 删除按钮按 `app:create/edit/delete` 收敛，见 business-development 的 features-module.md §13）；在单应用模式下（默认），通过 `beforeLoad` 直接规范化重定向至默认应用首页 (`/nivo/home`，由 `DEFAULT_APP_ID` 配置)，无需接口请求与选应用流程。
+  - `_main/select-app.tsx`：兼容历史 `/select-app` 路径，规范化重定向至根路径 `/`。
+  - `_main/settings/`：设置模块（**目录化**，与 `/` 共用 `MainLayout`；当前「个人资料 / 外观 / AI」三个子页）。
+    - `settings/route.tsx`：模块根，只渲染 `<Outlet />`；`settings/index.tsx` 把 `/settings` 重定向到默认子页 `/settings/profile`（与 `$appId/example/` 同一套写法）。**设置模块的二级导航由 `MainSidebar` 按路由前缀切换**（`/settings`、`/settings/**` → 设置导航，其余 → 通用导航；判定就是 `isSettingsSection` 一处）—— 嵌套路由只能替换内容区，无法接管外层侧边栏。两套导航共用品牌头（`BrandHeader`：方块 + 标题 + 移动端关闭按钮）与「快速搜索」入口（`SidebarSearchButton`，与业务侧边栏同一套 Kumo 官方范式）；设置导航在品牌行之下再加一行 `SettingsModuleHeader`（返回 `/` + 模块标题「设置」，参照 Cloudflare 控制台），**真正替换的只有模块行与菜单**。这是「同一 Sidebar 位置换内容」而非第二个 `Sidebar`，`Sidebar.Provider` 不重挂，折叠状态与拖拽宽度都保留。两套导航的渲染函数也是同一个（`ShellNavList`），只有菜单源不同。`_main` 外壳已挂 `CommandPaletteDialog`（⌘K / Ctrl+K，与 `AppShell` 同款接线），搜索按钮与快捷键共享同一面板；**进了设置模块会换成设置专属面板**（`SettingsCommandPaletteDialog`，见第 2 节「两份命令面板」）—— 搜索按钮不用改，分流在面板入口按 `isSettingsPath` 做。
+    - `settings/profile.tsx`：个人资料 (`/settings/profile`)，只读展示 `GET /profile` 返回的账号资料 —— 接口路径与前端路由无关，仍是同一支接口；后端没有更新接口，因此不做表单；接口不可用时逐项回落本地登录态（`useAuth().user`）并显式提示，不把兜底数据伪装成后端值。
+    - `settings/appearance.tsx`：外观 (`/settings/appearance`)，单张 `LayerCard`（标题「通用设置」`profile.settings.general`，形态是 `LayerCard.Secondary` + `LayerCard.Primary`）里放着若干本机偏好：主题（`#/lib/use-color-mode`）/ 语言（`#/lib/use-locale`）/ 时区（`#/lib/timezone`）/ 详情打开方式（`#/lib/store` 的 `detailOpenMode`，见 [./detail-preview.md](../../business-development/references/detail-preview.md)）/ 页面宽度（`#/lib/store` 的 `pageWidth`：全宽 / 限宽居中，默认全宽，落点在 `#/lib/page-width`）—— 这些是**即时生效 + 持久化在 `admin.preferences:<appId>`（按应用隔离，见 [./store.md](./store.md)）**，所以**没有保存按钮、没有 dirty 状态，不要套 `UnsavedChangesBar` 那套编辑态契约**。同页还有一个**开关型的外壳偏好**，它在全局的 `admin.shell-ui` 里（「换个应用还成立」）：界面动效（`motionEnabled`，默认开）。控件选型：**短枚举（≤3 项）用 Kumo `Tabs` 的 segmented 分段控件**（主题、详情打开方式、页面宽度），长枚举（语言、时区）用 `Select`，**布尔用 `Switch`**（界面动效）；**「详情打开方式」与「页面宽度」每段选项悬浮时还会弹一个浮层，用通用缩略图把该档位的页面变化演一遍**（`#/components/app-shell-preview`，见第 5 节）。账号安全 / 已连接应用 / API Token 等更重的设置后续扩展（往 `components/main-layout.tsx` 的 `SETTINGS_NAV_ITEMS` 追加导航项、或在卡片下方再加一张 `LayerCard` 即可）。
+    - `settings/AI.tsx`：AI (`/settings/AI`)，与外观页同一套「设置卡片 + 设置行」形态（`#/components/settings-card` 的 `SettingsCard` / `SettingRow`，不要再手写 `LayerCard`）。设置行有若干项，其中**显示方式**（`admin.preferences:<appId>` 的 `aiPanelMode`，`split` = Split View / `float` = Float）与**页面宽度**（`aiPageWidth`：跟随外观 / 全宽 / 限宽居中 —— **只作用于 `/$appId/sphere`**，会话区 + 输入区收在同一个宽度约束里；上限是聊天自己的 `max-w-4xl`，**比页面的 1440px 窄**，「跟随外观」只跟外观那个选择的档，落点见 `#/lib/page-width` 的 `aiChatWidthClass`）—— 与外观页同属「即时生效 + 按应用隔离持久化」，**没有保存按钮、没有 dirty 状态**。控件是与「主题」一致的分段控件（`Tabs` + `role="group"` 兜可访问名称），并带与「详情打开方式」同款的悬浮预览（见第 5 节；页面宽度那一行直接复用外观页的宽度缩略图动画）。**卡片标题直接复用 `profile.settings.general`（「通用设置」），不另开 `aiSection` 之类的重复文案**；设置项文案在 `profile.settings.aiDisplayMode*`，**两个选项（`aiModes.split` / `aiModes.float`）是形态名、各语言各自本地化**（中文「分屏视图 / 浮窗」，不要写成产品术语原文）。后续 AI 偏好继续往这张卡片加 `SettingRow`，或下方再加一张 `SettingsCard`。**文件名与路径保留大写的 `AI`**（缩写，与导航项显示名一致），由 `pnpm generate-routes` 生成的 `routeTree.gen.ts` 同步。
+    - 入口：侧边栏「个人资料」与顶栏 `UserMenu` 的 Profile 项（都指向 `/settings/profile`）；默认文案：中文「个人资料」、英文「Profile」（日语 `プロフィール`）。
+  - `_main/$.tsx`：`_main` 外壳内局部 404 兜底路由；全局挂载 `notFoundComponent: NotFound`。
+- `$appId/`：与特定应用强绑定的动态业务路由体系（**模块目录化**，每个业务模块独占一个目录）。
+  - `$appId/route.tsx`：业务控制台外壳布局（承载 `AppShell`：侧边栏、顶部导航条、面包屑、⌘K 命令面板）；
+  - `$appId/index.tsx`：访问 `/$appId` 根路径时自动重定向至默认主页 `/$appId/home`；
+  - `$appId/home/index.tsx`：应用的默认主页**仪表盘**（用户可自定义卡片，见第 8 节），侧边栏第一项（`nav.home`，文案「仪表盘」）对应 `/$appId/home`；
+  - `$appId/$.tsx`：业务外壳内局部 404 兜底路由；
+  - **业务代码在 `src/features/**`**（新架构）：路由目录只留薄适配（`createFileRoute` + 守卫 / `validateSearch` + 取参 + 渲染 feature 组件），
+    页面组件与 AI 声明（`feature.ts`）放 `src/features/<页面目录>/`（一页一目录、平铺，**不按路由层级建目录**）—— 见 [features-architecture.md](../../business-development/references/features-architecture.md)。
+    `-components/` / `-data/` **不再新增**，且 `src/features/**` 下面**不再按域嵌套子目录**（一页一目录，直接平铺在 `features/` 下）。
+  - **模块目录化约定（强制）**：任何业务模块都必须以目录承载，禁止再新增扁平的 `$appId/xxx.tsx` 单文件模块。目录内 `route.tsx` 是该模块的根与边界（渲染 `<Outlet />`，承载模块级守卫/布局扩展点），模块入口用 `index.tsx`，模块下的子模块继续用子目录组织；**页面实现不放在路由目录**，而是平铺在 `src/features/<页面目录>/`（一页一目录），路由文件只做 `createFileRoute` + 守卫 / `validateSearch` + 取参 + 渲染组件。
+  - 示例（示例模块）：`$appId/example/route.tsx`（模块根）→ `$appId/example/index.tsx`（重定向到默认子页 `/example/table`）→ `$appId/example/table/index.tsx`（表格示例）→ `$appId/example/table/$.tsx`（Splat：新建 / 编辑 / 详情）；另一页 `$appId/example/complex-table/index.tsx`（复杂表格）。页面实现全在 `src/features/example/table/` 与 `src/features/example/complex-table/`（平铺）。
+  - 子路由切换时外壳不重新挂载（Zero-Remount），页面切换仅替换内容区 `<Outlet />`；
+  - 全局路由 pending / error / notFound 状态 (`apps/web/src/router.tsx`) 仅在 Outlet 内容区局部渲染，不破坏外壳；
+  - `beforeLoad` 守卫：校验认证状态，并自动同步 URL 中的 `$appId` 与当前激活应用；若访问历史别名路径（如 `/admin`）会自动规范化重定向至 `/$appId/home`，若 appId 不存在则直接抛出 404 (`notFound()`) 并在 `_main` 通用外壳中呈现；
+  - 面包屑计算：顶栏面包屑自动剔除开头的 `$appId` 参数，并按 `NAV_GROUPS` 做最长前缀匹配，剩余分段作为动态参数逐级追加（如 `/$appId/example/table` 显示为 `首页 / 示例 / 表格示例`，`/$appId/example/table/10001` 显示为 `首页 / 示例 / 表格示例 / 10001`）。
+    - 剩余分段默认只显示**原始段**（如 `483`）。业务模块可在数据到达后用 `apps/web/src/lib/breadcrumb-trail.ts` 的 `setBreadcrumbTrail(owner, { [path]: { label, parent } })` 注册层级，`AppHeader` 命中后把它还原成**带名称、可逐级点击**的层级链（功能模块据此把 `/$appId/system/features/483` 显示为 `首页 / 系统 / 功能 / system / menus`，点 `system` 即回到 484）；按 `owner` 覆盖式注册、组件卸载即清除，未注册时行为完全不变。
+- `auth/route.tsx`：认证门户专用布局 (`/auth/login`)。右上角内置浮动语言与主题切换器。
+
+---
+
+> 以下由 `AGENTS.md` 搬入（原文保留）。那份文件现在只留**索引与铁律**，
+> 各模块的细节都落在对应文档里，**需要时再来读这一份**。
+
+## 附：契约速查 —— 路由与外壳
+
+## 1. 多布局分层路由架构 (Multi-Layout Routing Architecture)
+
+> **完整说明见 [.agents/skills/platform-development/references/routing-architecture.md](./routing-architecture.md)**：路由分层拓扑、
+> 每个路由文件的职责、设置模块的侧边栏切换、外壳持久化（Zero-Remount）、面包屑与
+> `setBreadcrumbTrail` 的注册机制。下面只列必须记住的。
+
+- 路由在 `apps/web/src/routes/`，自动汇编成 `apps/web/src/routeTree.gen.ts`（**自动生成，禁止手改**）。
+- **模块目录化（强制）**：业务模块一律用目录承载，**禁止再新增扁平的 `$appId/xxx.tsx`**。
+  目录内 `route.tsx` 是模块根与边界（渲染 `<Outlet />`）、入口用 `index.tsx`、
+  **私有代码放 `-` 前缀目录**（`router-plugin` 默认忽略）。
+- 三套外壳：`__root.tsx`（全局，桥接 Kumo 链接 + Toast）/ `_main/`（与 appId 无关，含设置模块）/
+  `$appId/`（业务外壳，承载 `AppShell`）。**子路由切换外壳不重挂**，只换 `<Outlet />`。
+- `$appId/route.tsx` 的 `beforeLoad` 守卫：校验认证、同步 URL 的 `$appId` 与激活应用、
+  历史别名（如 `/admin`）规范化重定向、appId 不存在直接 `notFound()`。
+  **守卫本体在 `#/lib/app-route-guard` 的 `guardAppRoute`**，逃离外壳的
+  `$appId_.sphere` 也调同一份。
+- **逃离父布局**：`/$appId/sphere`（全屏 AI 对话页）用目录名 `$appId_.sphere`
+  （段尾下划线）挂到根布局下，URL 不变但**不继承 `AppShell`**；代价是守卫与
+  `registerAiShellBridge` 都要自己接一遍。子路由：`sphere/` = 新会话、
+  `sphere/chat/$chatId` = 指定会话（loader 校验不到 → 404）。
+- **面包屑**剔除 `$appId` 并按 `NAV_GROUPS` 最长前缀匹配；剩余分段默认显示原始段，
+  业务模块可用 `setBreadcrumbTrail(owner, …)` 注册成**带名称、可逐级点击**的层级链
+  （按 `owner` 覆盖式注册、卸载即清除，未注册时行为不变）。
+
+## 附：契约速查 —— 导航系统与命令面板
+
+## 2. 导航系统与命令面板 (Navigation & Command Palette)
+
+- `apps/web/src/lib/navigation/` 目录是管理后台所有导航项的**单一真值来源 (SSOT)**（入口 `index.ts`；名单分两个文件：业务的 `app-nav.ts`、外壳的 `shell-nav.ts`），共三份配置：
+  - `NAV_GROUPS`：`$appId` 业务导航，`to` **相对 appId**（`/home`、`/example/table`）；由 `AppSidebar` 渲染、`AppHeader` 用它的 `to` 做面包屑最长前缀匹配，并经 `ALL_NAV_TARGETS` 扁平化后供命令面板使用；
+  - `MAIN_NAV_ITEMS`：`_main` 通用外壳导航（应用选择 `/`、个人资料 `/settings/profile`），由 `MainSidebar` 渲染；
+  - `SETTINGS_NAV_ITEMS`：设置模块的二级导航（个人资料 `/settings/profile`、外观 `/settings/appearance`（图标 `SwatchesIcon`、文案 `profileNav.appearance`）、AI `/settings/AI`（图标 `SparkleIcon`、文案 `profileNav.ai`，**路径保留大写缩写**）），由 `MainSidebar` 的设置分支渲染。**「外观」与「主题」是两个 key**：前者是模块入口（`profileNav.appearance`），后者是主题选择器的分组标题（`theme.label`），不要合并。
+  - 后两份是 `ShellNavItem`，`to` 是**绝对路径**（不拼 appId），并带 `matchPaths` 表达「历史别名也算选中」（如 `/select-app` 之于 `/`）。**不要把外壳项塞进 `NAV_GROUPS`** —— 会污染 `AppHeader` 的业务面包屑匹配，且 `_main` 外壳根本没有 appId 前缀。`ALL_SHELL_NAV_TARGETS` 是两份外壳导航合并去重后的「路径 → 外壳页面」解析表，消费方是窗口标签页（`#/lib/page-tabs`）与 AI 的页面上下文 / 提示词事实，**不再给命令面板用**（见下面「两份命令面板」）。`MAIN_PALETTE_NAV_ITEMS` 是 `MAIN_NAV_ITEMS` 剔掉设置模块后的子集，主命令面板只拿它。
+- **`isSettingsPath` 是「在设置模块里」的唯一判定**（`navigation/paths.ts`，导出面在 `#/lib/navigation`）：`/settings` 与 `/settings/**`。它同时决定三件事 —— 侧边栏换成设置二级导航（`MainSidebar`）、桌面壳走独立设置窗口（`DesktopMainLayout`）、⌘K 交给设置专属面板（`CommandPaletteDialog` 的分流）。**不要再手写 `pathname.startsWith('\'/settings\'')`**（`/settings-x` 会被误判）。
+- **三处侧边栏与命令面板都必须是「配置对象 → map 渲染」**，不允许把菜单项硬编码在 JSX 里（`MainSidebar` 曾如此）：加 / 改导航项只动 `navigation/` 下的名单文件，业务侧边栏、外壳侧边栏、⌘K 面板三个入口自动同步。外壳侧边栏统一走 `#/layouts/common/nav-shared` 的 `ShellNavButton`。
+- **外壳组件的唯一实现在 `#/layouts/`**（侧边栏 Provider 在 `#/layouts/provider`）：曾有一层
+  `#/components/shell/*` 纯转发 shim（只把 `#/layouts` 的名字换个马甲再导出），已删除 ——
+  **不要再引入**。别名层让「搜到的组件名」与「读到的实现」变成两跳，改组件时容易改错文件。
+- **导航项没有描述字段**：侧边栏与命令面板列表**只显示标题**（曾经给命令面板当副标题的 `description` 已删除，不要加回来）；检索能力靠 `keywords`（中英双语，保证两种输入都能命中）。
+- 导航文案通过 `labelKey` / `children[].labelKey` 指向 `common` 命名空间下的 i18n 键，不要在组件里硬编码路径→文案的映射；新增导航项时**只写 `zh-CN` 的 `nav.*` 文案**，其它语言由翻译流水线补齐。
+- 业务首页路径统一配置为 `/home`，拼接当前激活应用标识生成 `/$appId/home`；它的**文案是「仪表盘」**（`nav.home`），别只改一处就以为改完了 —— 导航项、命令面板、顶栏面包屑三处共用这个 key。检索关键词同时保留 `home` / `首页` 与 `dashboard` / `仪表盘`（老用户还在按老名字找它）。
+- **命令面板自身的文案也必须走 i18n**：`common:commandPalette.*`（placeholder / empty / 分组标题）；主题命令直接复用 **`theme.*`**（与 `UserMenu` 的「主题」子菜单同一套键），不要再写「切换到浅色主题」这类面板自有文案。
+
+### 两份命令面板（业务区 / 设置区，完全拆分）
+
+`#/components/command-palette/` 是一个目录，**不是一个面板**：
+
+| 文件 | 角色 |
+| --- | --- |
+| `#/components/command-palette/palette.tsx` | **壳**：Kumo `CommandPalette` 的 Root / Input / List / Item 组合、搜索态、检索命中判定（标题 + `keywords`）、「选中即执行并关闭」。**不含任何命令数据**，两份面板共用 |
+| `#/components/command-palette/main.tsx` | **主面板** `MainCommandPaletteDialog`：业务页面（`ALL_NAV_TARGETS`，拼 appId 前缀）+ 外壳项（`MAIN_PALETTE_NAV_ITEMS`，**已剔除设置模块**）+「操作」组（主题三项，数据来自 `#/lib/theme-options`） |
+| `#/features/settings/command-palette.tsx` | **设置面板** `SettingsCommandPaletteDialog`：设置页面（`SETTINGS_NAV_ITEMS`，权限过滤与设置侧边栏同一份）+ 各设置页自己的命令组（`#/features/settings/commands`）。放在 feature 里而不是 `components/`：它依赖设置模块的命令源，而 `components → features` 是反向依赖 |
+| `#/components/command-palette/index.tsx` | 入口 `CommandPaletteDialog`：按 `isSettingsPath()` **二选一**。七个挂载点（default / desktop / mobile 的 App 与 Main 布局、桌面设置窗口、sphere）挂的都是它，**布局一行都不用改** |
+
+- **数据源互不可见**：主面板搜不到设置页，设置面板搜不到业务页（以前一个面板混着两份外壳导航）。`MAIN_PALETTE_NAV_ITEMS` 就是这条边界的数据侧落点。
+- **设置页的命令由页面自己声明**：`#/features/settings/commands` 只有契约（`SettingsCommand` / `SettingsCommandGroup`）与聚合钩子 `useSettingsCommandGroups`；实际命令在 `appearance-commands.ts` / `ai-commands.ts`。**加一条设置命令 = 往对应页面模块的数组里加一条**，面板不用改。
+- **过滤集中在聚合处**：`requiresAi: true` 的组（AI）由聚合钩子按偏好 store 的 `aiEnabled` 统一收窄 —— AI 关掉后面板里一条 AI 命令都不出现（但「设置 → AI」这个**页面入口**仍在，否则没法重新打开）。命令源不要自己判开关，空组也由聚合处剔除。
+- **主题选项只有一个真值**：`#/lib/theme-options` 的 `THEME_OPTIONS`，被 `UserMenu`、主面板「操作」组、设置面板「外观」组三方共用（以前三处各抄一份）。
+- **设置命令不做无障碍的越权操作**：只用 `#/lib/store` / `#/lib/use-color-mode` 已有的偏好写入口（AI 显示方式、主题、页面宽度），不新增分支逻辑。
+- **新增设置页时的接入点**：
+  1. `SETTINGS_NAV_ITEMS`（`shell-nav.ts`）加导航项 —— 设置侧边栏与该面板的「页面」组同时生效；
+  2. 要命令的话照抄 `appearance-commands.ts` 的 hook 形状，在 `commands.ts` 的数组里加一行（AI 相关加 `requiresAi: true`）。
